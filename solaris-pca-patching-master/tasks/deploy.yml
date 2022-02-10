@@ -1,0 +1,12 @@
+---
+
+# Simple task to upload patches to the target host
+# This is the reason cswrsync is required, the --files-from options
+# is not supported by the native solaris version of rsync
+# and it is very important to keep efficiency in the playbook run
+
+- name: Upload patches to server
+  synchronize: src={{ pca_basedir }}/patches
+               dest={{ pca_tempdir }}/pca_patches
+               compress=no
+               rsync_opts="--files-from={{ pca_basedir }}/{{ inventory_hostname }}/patchlist.out"

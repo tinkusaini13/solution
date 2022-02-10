@@ -1,0 +1,318 @@
+---
+# tasks file for solariscommon
+
+# task to create a boot environment
+- name: create boot environment
+  command: /usr/sbin/beadm create {{ solariscommon_bename }}_{{ ansible_date_time['date'] | regex_replace('-', '') }}_{{ ansible_date_time['time'] | regex_replace(':', '') }}
+  when: solariscommon_be
+  tags: bootenv
+
+# task for timezone configuration
+- name: check timezone
+  command: /usr/bin/svcprop -p timezone/localtime 'timezone:default'
+  changed_when: False
+  register: timezonenow
+  tags: timezone
+
+- name: set timezone
+  command:  /usr/sbin/svccfg -s 'timezone:default' setprop timezone/localtime = {{ solariscommon_timezone }}
+  when: timezonenow.stdout != "{{ solariscommon_timezone }}"
+  notify:
+    - refresh timezone service
+    - restart timezone service
+  tags: timezone
+
+# task for dns configuration
+- name: check nameserver for dns client
+  shell: /usr/sbin/svccfg -s dns/client listprop -o value config/nameserver |  cut -c 2-
+  changed_when: False
+  register: nameservernow
+  tags: dns-client
+
+- name: set nameserver for dns client
+  command: /usr/sbin/svccfg -s dns/client setprop config/nameserver = 'net_address:' ({{ solariscommon_dns_servers }})
+  when: nameservernow.stdout != "{{ solariscommon_dns_servers }}"
+  notify:
+    - refresh dns/client service
+    - restart dns/client service
+  tags: dns-client
+
+- name: check search for dns client
+  shell: grep search /etc/resolv.conf | cut -f2
+  changed_when: False
+  register: searchnow
+  tags: dns-client
+
+- name: set search for dns client
+  command: /usr/sbin/svccfg -s dns/client setprop config/search = 'astring:' '({{ solariscommon_dns_search }})'
+  when: "searchnow.stdout not in {{ solariscommon_dns_search | regex_replace('\" \"', ' ') }}"
+  notify:
+    - refresh dns/client service
+    - restart dns/client service
+  tags: dns-client
+
+# task for name-service switch
+- name: check configuration for name-service
+  shell: /usr/sbin/svccfg -s system/name-service/switch listprop -o value config/host | cut -c 2-
+  changed_when: False
+  register: nsswitchnow
+  tags: ns-switch
+
+- name: set configuration for name-service
+  command: /usr/sbin/svccfg -s system/name-service/switch setprop config/host = 'astring:' '({{ solariscommon_ns_switch }})'
+  when: nsswitchnow.stdout != '{{ solariscommon_ns_switch }}'
+  notify:
+    - refresh name-service switch
+    - restart name-service switch
+  tags: ns-switch
+
+# task for ntp configuration (only for global zones)
+- name: check if zone is global
+  command: /usr/bin/zonename
+  changed_when: False
+  register: zonename
+  tags: ntp
+
+- name: install ntp
+  pkg5: name=/service/network/ntp state=present
+  tags: ntp
+  when: zonename.stdout == "global"
+
+- name: copy ntp.conf template
+  template: src=templates/ntp.conf.j2 dest=/etc/inet/ntp.conf owner=root group=sys mode=444 backup=yes
+  when: zonename.stdout == "global"
+  notify:
+    - refresh ntp service
+    - restart ntp service
+  tags: ntp
+
+- name: make sure ntp service is started
+  service: name=network/ntp state=started enabled=yes sleep=5
+  when: zonename.stdout == "global"
+  tags: ntp
+
+# task to set banner
+- name: copy banner to /etc/motd
+  template: src=templates/banner.j2 dest=/etc/motd owner=root group=sys mode=644 backup=yes
+  tags: banner
+
+- name: copy banner to /etc/issue
+  template: src=templates/banner.j2 dest=/etc/issue owner=root group=sys mode=644 backup=yes
+  tags: banner
+
+- name: insert/update "Banner" configuration in /etc/ssh/sshd_config
+  lineinfile: >
+    dest=/etc/ssh/sshd_config
+    regexp="^Banner\s+"
+    line="Banner /etc/issue"
+    backup=yes
+  notify:
+    - refresh sshd service
+    - restart sshd service
+  tags: banner
+
+# tasks for some system access, authentication and authorization (CIS).
+- name: set MaxAuthTries
+  lineinfile: >
+    dest=/etc/ssh/sshd_config
+    regexp="^MaxAuthTries\s+"
+    line="MaxAuthTries {{ solariscommon_maxauthtries }}"
+    backup=yes
+  notify:
+    - refresh sshd service
+    - restart sshd service
+  tags: auths
+
+- name: set IgnoreRhosts
+  lineinfile: >
+    dest=/etc/ssh/sshd_config
+    regexp="^IgnoreRhosts\s+"
+    line="IgnoreRhosts {{ solariscommon_ignorerhosts }}"
+    backup=yes
+  notify:
+    - refresh sshd service
+    - restart sshd service
+  tags: auths
+
+- name: set PermitRootLogin
+  lineinfile: >
+    dest=/etc/ssh/sshd_config
+    regexp="^PermitRootLogin\s+"
+    line="PermitRootLogin {{ solariscommon_permitrootlogin }}"
+    backup=yes
+  notify:
+    - refresh sshd service
+    - restart sshd service
+  tags: auths
+
+- name: set PermitEmptyPasswords
+  lineinfile: >
+    dest=/etc/ssh/sshd_config
+    regexp="^PermitEmptyPasswords\s+"
+    line="PermitEmptyPasswords {{ solariscommon_permitemptypasswords }}"
+    backup=yes
+  notify:
+    - refresh sshd service
+    - restart sshd service
+  tags: auths
+
+- name: set SLEEPTIME
+  lineinfile: >
+    dest=/etc/default/login
+    regexp="^SLEEPTIME=\d+"
+    line="SLEEPTIME={{ solariscommon_sleeptime }}"
+    backup=yes
+  tags: auths
+
+- name: restrict root login to CONSOLE
+  lineinfile: >
+    dest=/etc/default/login
+    regexp="^CONSOLE.+"
+    line="CONSOLE=/dev/console"
+    backup=yes
+  tags: auths
+
+- name: set RETRIES
+  lineinfile: >
+    dest=/etc/default/login
+    regexp="^RETRIES=\d+"
+    line="RETRIES={{ solariscommon_retries }}"
+    backup=yes
+  tags: auths
+
+- name: set LOCK_AFTER_RETRIES
+  lineinfile: >
+    dest=/etc/security/policy.conf
+    regexp="^LOCK_AFTER_RETRIES.+"
+    line="LOCK_AFTER_RETRIES={{ solariscommon_lockafterretries }}"
+    backup=yes
+  tags: auths
+
+# tasks for some user account and environment (CIS).
+- name: set MAXWEEKS
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MAXWEEKS.+"
+    line="MAXWEEKS={{ solariscommon_maxweeks }}"
+    backup=yes
+  tags: users
+
+- name: set MINWEEKS
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MINWEEKS.+"
+    line="MINWEEKS={{ solariscommon_minweeks }}"
+    backup=yes
+  tags: users
+
+- name: set WARNWEEKS
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^WARNWEEKS.+"
+    line="WARNWEEKS={{ solariscommon_warnweeks }}"
+    backup=yes
+  tags: users
+
+- name: set PASSLENGTH
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^PASSLENGTH=\d+"
+    line="PASSLENGTH={{ solariscommon_passlength }}"
+    backup=yes
+  tags: users
+
+- name: set NAMECHECK
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^NAMECHECK=.+"
+    line="NAMECHECK={{ solariscommon_namecheck }}"
+    backup=yes
+  tags: users
+
+- name: set HISTORY
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^HISTORY=\d+"
+    line="HISTORY={{ solariscommon_history }}"
+    backup=yes
+  tags: users
+
+- name: set MINDIFF
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MINDIFF=\d+"
+    line="MINDIFF={{ solariscommon_mindiff }}"
+    backup=yes
+  tags: users
+
+- name: set MINUPPER
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MINUPPER=\d+"
+    line="MINUPPER={{ solariscommon_minupper }}"
+    backup=yes
+  tags: users
+
+- name: set MINLOWER
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MINLOWER=\d+"
+    line="MINLOWER={{ solariscommon_minlower }}"
+    backup=yes
+  tags: users
+
+- name: set MINSPECIAL
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MINSPECIAL=\d+"
+    line="MINSPECIAL={{ solariscommon_minspecial }}"
+    backup=yes
+  tags: users
+
+- name: set MINDIGIT
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MINDIGIT=\d+"
+    line="MINDIGIT={{ solariscommon_mindigit }}"
+    backup=yes
+  tags: users
+
+- name: set MAXREPEATS
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^MAXREPEATS=\d+"
+    line="MAXREPEATS={{ solariscommon_maxrepeats }}"
+    backup=yes
+  tags: users
+
+- name: set WHITESPACE
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^WHITESPACE.+"
+    line="WHITESPACE={{ solariscommon_whitespace }}"
+    backup=yes
+  tags: users
+
+- name: set DICTIONDBDIR
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^DICTIONDBDIR=.+"
+    line="DICTIONDBDIR={{ solariscommon_dictiondbdir }}"
+    backup=yes
+  tags: users
+
+- name: set DICTIONLIST
+  lineinfile: >
+    dest=/etc/default/passwd
+    regexp="^DICTIONLIST=.+"
+    line="DICTIONLIST={{ solariscommon_dictionlist }}"
+    backup=yes
+  tags: users
+
+- name: set UMASK
+  lineinfile: >
+    dest=/etc/default/login
+    regexp="^UMASK=.+"
+    line="UMASK={{ solariscommon_umask }}"
+    backup=yes
+  tags: users

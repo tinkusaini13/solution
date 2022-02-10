@@ -1,0 +1,10 @@
+---
+- hosts: storage
+
+  tasks:
+  - name: Allocate storage blocks
+    ldevblock:
+      horcm: "{{horcminst}}"
+      blocks: "{{ldev_blocks}}"
+
+# vim: tabstop=2 shiftwidth=2

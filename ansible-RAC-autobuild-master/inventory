@@ -1,0 +1,13 @@
+[storage]
+skeeter
+
+[chassis]
+todd ldom_name=autobld1
+rod ldom_name=autobld2
+
+[domain]
+autobld1-mgmt
+autobld2-mgmt
+
+[aiserver]
+barbrady

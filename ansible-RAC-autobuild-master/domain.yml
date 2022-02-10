@@ -1,0 +1,184 @@
+---
+- hosts: domain
+
+  tasks:
+    # net
+  - name: Setup RAC networks
+    rac_net:
+    tags:
+      - net
+  - name: Wait for gateway switchover
+    local_action: wait_for timeout=15
+    become: False
+    tags:
+      - net
+  - name: Add public IP to hosts file
+    lineinfile:
+      dest: /etc/inet/hosts
+      line: "{{lookup('dig', ldom_name)}} {{ldom_name}} {{ldom_name}}.{{dns_domain}}"
+    tags:
+      - net
+  - name: Lookup private IPs
+    set_fact:
+      priv_lookup: "{{lookup('dig', item | regex_replace('-mgmt$', '-priv1'))}} {{item | regex_replace('-mgmt$', '-priv1')}}"
+    with_items: "{{groups['domain']}}"
+    register: privip_result
+    tags:
+      - net
+  - name: Add private IPs to hosts file
+    lineinfile:
+      dest: /etc/inet/hosts
+      line: "{{item}}"
+    with_items: "{{ privip_result.results | map(attribute='ansible_facts.priv_lookup') | list }}"
+    tags:
+      - net
+
+    # ssh
+  - name: Create local SSH tmpdir
+    local_action: file state=directory path="{{ssh_tmpdir}}" mode=0700
+    become: False
+    run_once: True
+    tags:
+      - ssh
+  - name: Create local oracle SSH keypair
+    local_action: "command /usr/bin/ssh-keygen -q -t dsa -C 'oracle@{{cluster_name}}' -N '' -f {{ssh_tmpdir}}/{{cluster_name}}-oracle creates={{ssh_tmpdir}}/{{cluster_name}}-oracle"
+    become: False
+    run_once: True
+    tags:
+      - ssh
+  - name: Create local grid SSH keypair
+    local_action: "command /usr/bin/ssh-keygen -q -t dsa -C 'grid@{{cluster_name}}' -N '' -f {{ssh_tmpdir}}/{{cluster_name}}-grid creates={{ssh_tmpdir}}/{{cluster_name}}-grid"
+    become: False
+    run_once: True
+    tags:
+      - ssh
+  - name: Create oracle SSH dir
+    file:
+      state: directory
+      path: "/home/oracle/.ssh"
+      owner: oracle
+      group: oinstall
+      mode: 0700
+    tags:
+      - ssh
+  - name: Create grid SSH dir
+    file:
+      state: directory
+      path: "/home/grid/.ssh"
+      owner: grid
+      group: oinstall
+      mode: 0700
+    tags:
+      - ssh
+  - name: Copy oracle private key into place
+    copy:
+      src: "{{ssh_tmpdir}}/{{cluster_name}}-oracle"
+      dest: "/home/oracle/.ssh/id_dsa"
+      mode: 0600
+      owner: oracle
+      group: oinstall
+    tags:
+      - ssh
+  - name: Copy oracle public key into place
+    copy:
+      src: "{{ssh_tmpdir}}/{{cluster_name}}-oracle.pub"
+      dest: "/home/oracle/.ssh/id_dsa.pub"
+      mode: 0644
+      owner: oracle
+      group: oinstall
+    tags:
+      - ssh
+  - name: Copy oracle public key into auth keys
+    copy:
+      src: "{{ssh_tmpdir}}/{{cluster_name}}-oracle.pub"
+      dest: "/home/oracle/.ssh/authorized_keys"
+      mode: 0644
+      owner: oracle
+      group: oinstall
+    tags:
+      - ssh
+  - name: Copy grid private key into place
+    copy:
+      src: "{{ssh_tmpdir}}/{{cluster_name}}-grid"
+      dest: "/home/grid/.ssh/id_dsa"
+      mode: 0600
+      owner: grid
+      group: oinstall
+    tags:
+      - ssh
+  - name: Copy grid public key into place
+    copy:
+      src: "{{ssh_tmpdir}}/{{cluster_name}}-grid.pub"
+      dest: "/home/grid/.ssh/id_dsa.pub"
+      mode: 0644
+      owner: grid
+      group: oinstall
+    tags:
+      - ssh
+  - name: Copy grid public key into auth keys
+    copy:
+      src: "{{ssh_tmpdir}}/{{cluster_name}}-grid.pub"
+      dest: "/home/grid/.ssh/authorized_keys"
+      mode: 0644
+      owner: grid
+      group: oinstall
+    tags:
+      - ssh
+  - name: SSH to each cluster node
+    shell: "/usr/bin/sudo -u {{item[0]}} /usr/bin/ssh -o 'StrictHostkeyChecking no' -o 'BatchMode yes' {{item[1] | regex_replace('-mgmt$', '')}} 'exit 0'"
+    with_nested:
+      - [ "oracle", "grid" ]
+      - "{{groups['domain']}}"
+    tags:
+      - ssh
+
+    # disk
+  - name: Setup GRID disks
+    grid_disk:
+    tags:
+      - disk
+  
+    # vfstab
+  - name: Setup datapump NFS mount
+    mount:
+      name: /opt/apps/datapump
+      fstype: nfs
+      opts: vers=3,rsize=32768,wsize=32768,rw,intr,bg
+      src: zero:/export/datapump
+      state: mounted
+    tags:
+      - nfs
+
+    # horcm
+  - name: Install horcm
+    pkg5: name=horcm
+    tags:
+      - horcm
+      - pkgs
+  - name: Add horcm {{horcminst}} service instance and config file
+    horcm_setup:
+      horcminst: "{{horcminst}}"
+      disk_groups: "{{rac_storage}}"
+    tags:
+      - horcm
+  - name: Enable horcm service
+    service:
+      name: "horcm{{horcminst}}"
+      enabled: yes
+    tags:
+      - horcm
+
+    # patch audit
+  - name: Get date/time for patch audit file
+    setup: filter=ansible_date_time gather_subset=!hardware,!network,!virtual,!ohai,!facter
+    tags:
+      - patchdb
+  - name: Set patch audit file
+    replace:
+      dest: "{{patch_audit_file}}"
+      regexp: "^New_Build"
+      replace: "{{patch_audit_rev}} Patching completed:\n{{ansible_date_time['date']}} {{ansible_date_time['time']}}"
+    tags:
+      - patchdb
+
+# vim: tabstop=2 shiftwidth=2

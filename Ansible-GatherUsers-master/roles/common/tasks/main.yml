@@ -1,0 +1,14 @@
+---
+# Ansible playbook to audit and report on users on servers
+
+- include: Redhat.yml
+  when: ansible_os_family=="RedHat"
+
+- include: AIX.yml
+  when: ansible_os_family=="AIX"
+
+- include: Solaris.yml
+  when: ansible_os_family=="Solaris"
+
+- include: HPUX.yml
+  when: ansible_os_family=="HPUX"

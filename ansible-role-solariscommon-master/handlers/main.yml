@@ -1,0 +1,32 @@
+---
+# handlers file for solariscommon
+
+- name: refresh timezone service
+  service: name=timezone:default state=reloaded sleep=5
+
+- name: restart timezone service
+  service: name=timezone:default state=restarted sleep=5
+
+- name: refresh name-service switch
+  service: name=name-service/switch state=reloaded sleep=5
+
+- name: restart name-service switch
+  service: name=name-service/switch state=restarted sleep=5
+
+- name: refresh dns/client service
+  service: name=dns/client:default state=reloaded sleep=5
+
+- name: restart dns/client service
+  service: name=dns/client:default state=restarted sleep=5
+
+- name: refresh ntp service
+  service: name=network/ntp:default state=reloaded sleep=5
+
+- name: restart ntp service
+  service: name=network/ntp:default state=restarted sleep=5
+
+- name: refresh sshd service
+  service: name=network/ssh:default state=reloaded sleep=5
+
+- name: restart sshd service
+  service: name=network/ssh:default state=restarted sleep=5

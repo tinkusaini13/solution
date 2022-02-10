@@ -1,0 +1,13 @@
+---
+- name: Picking all hosts in inventory.hosts
+  hosts: all
+  user: "{{ USER }}"
+  gather_facts: true
+  tasks:
+    - debug:
+        msg: "{{ ansible_memfree_mb|int }}"
+
+    - debug:
+        msg: "{{ ansible_memory_mb|int }}"
+    - debug:
+        msg: "{{ ansible_memtotal_mb|int }}"

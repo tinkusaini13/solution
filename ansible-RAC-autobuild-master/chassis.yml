@@ -1,0 +1,54 @@
+---
+- name: Create
+  hosts: chassis
+  tasks:
+  - name: Create domains
+    solaris_ldom:
+      state: bound
+      name: "{{ldom_name}}"
+      cores: "{{cores}}"
+      memory: "{{memory}}"
+      domain_vars:
+        {
+        "network-boot-arguments": "host-ip={{mgmt_ip}},router-ip={{mgmt_gw}},subnet-mask={{mgmt_nm}},hostname={{mgmt_hostname}},file=http://{{ai_server_ip}}:5555/cgi-bin/wanboot-cgi",
+        "boot-device": "net",
+        "boot-file": "- install"
+        }
+      rac_storage: "{{rac_storage}}"
+      vnets: "{{vnets}}"
+      horcminst: "{{horcminst}}"
+  tags:
+    - create
+
+- name: AI
+  hosts: chassis
+  serial: 1
+  tasks:
+  - name: Get mgmt MAC address
+    shell: "/usr/sbin/ldm list -p -o net {{ldom_name}} | /usr/bin/grep mgmt | /usr/bin/awk -F'|' '{print $5}' | /usr/bin/awk -F= '{print $2}'"
+    register: mac_addr
+  - name: Add client to AI server
+    shell: "/usr/bin/aiconf -H {{mgmt_hostname}} -d {{dns_domain}} -i {{mgmt_ip}} -e {{mac_addr.stdout}} -n {{ai_service}} -c {{class}} {{aiconf_build_profiles}}"
+    delegate_to: "{{groups['aiserver'][0]}}"
+    ignore_errors: "{{ ansible_check_mode }}"
+  tags:
+    - ai
+
+- name: Install
+  hosts: chassis
+  tasks:
+  - name: Start domain
+    solaris_ldom:
+      state: active
+      name: "{{ldom_name}}"
+  - name: Wait for domain to boot
+    local_action: wait_for timeout=5
+    become: False
+  - name: Remove boot install flag
+    solaris_ldom:
+      name: "{{ldom_name}}"
+      domain_vars: { "boot-file": }
+  tags:
+    - install
+
+# vim: tabstop=2 shiftwidth=2

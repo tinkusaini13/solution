@@ -1,0 +1,53 @@
+- name: Install debian-goodies to be able to see if a reboot is required
+  apt:
+    update_cache: yes
+    name: debian-goodies
+    state: latest
+  when: ansible_os_family == "Debian"
+
+- name: debian apt-get dist-upgrade
+  apt:
+    update_cache: yes
+    upgrade: dist
+  register: output
+  when: ansible_os_family == "Debian"
+  notify:
+  - log to file
+
+- name: check if running in a BrandZ zone
+  command: uname -v
+  register: not_in_zone
+  changed_when: "'BrandZ virtual linux' not in not_in_zone.stdout"
+
+- name: run checkrestart
+  command: checkrestart
+  register: checkrestart_out
+  changed_when: "'Found 0 processes using old versions of upgraded files' not in checkrestart_out.stdout"
+  when: not_in_zone.changed
+  notify:
+  - reboot
+
+- name: check running kernel version
+  shell: "uname -v | awk '{print $4}'"
+  register: running_kernel
+  when: not_in_zone.changed
+
+- name: check installed kernel latest version
+  shell: "dpkg -l | grep linux-image | grep -v 'meta-package' | grep ii | awk '{print $3}' | sort -n | tail -1"
+  register: installed_kernel
+  changed_when: running_kernel.stdout != installed_kernel.stdout
+  when:
+  - not_in_zone.changed
+  - ansible_architecture != "armv6l"
+  notify:
+  - reboot
+
+- meta: flush_handlers
+
+# autoremove bug in anisble module
+#- name: cleanup old kernel via apt-get autoremove
+#  apt:
+#    autoremove: yes
+#    purge: yes
+#  when:
+#  - cleanup_old_kernels

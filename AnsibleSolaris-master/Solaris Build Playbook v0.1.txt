@@ -1,0 +1,338 @@
+############ Build Playbook for Solaris 11##################
+# following tasks are performed
+# 1. Template - ntp, dns, syslog, snmp, nsswitch, default/login , default/passwd, default/keyserv
+# 2. Install Agent - networker, CCA, nimsoft
+# 3. Audit configuration
+# 4. Logrotate settings
+# 5. Hardening configuration
+#############################################################
+- hosts: SOL11
+  remote_user: root
+  tasks:
+##################### Create log and audit ##########################
+      - zfs:
+           name: rpool/ROOT/solaris/var/audit
+           state: present
+           quota: 15G
+           mountpoint: /var/audit
+      - zfs:
+           name: rpool/ROOT/solaris/var/log
+           state: present
+           quota: 15 G
+           mountpoint: /var/log
+######################## Install Networker, CCA, Nimsoft #################
+      - command: mkdir -p /var/tmp/NW
+        args:
+            creates: /var/tmp/NW
+      - copy:
+           src: /data/Playbooks/BuildPlaybooks/SolPkg/solaris_64/LGTOclnt.tgz
+           dest: /var/tmp/NW/LGTOclnt.tgz
+      - copy:
+           src: /data/Playbooks/BuildPlaybooks/SolPkg/solaris_64/LGTOman.tgz
+           dest: /var/tmp/NW/LGTOman.tgz
+      - unarchive:
+           src: /var/tmp/NW/LGTOman.tgz
+           dest: /var/tmp/NW/
+           remote_src: yes
+      - unarchive:
+           src: /var/tmp/NW/LGTOclnt.tgz
+           dest: /var/tmp/NW/
+           remote_src: yes
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/solaris11_NW_VDA_response.txt
+             dest: /var/tmp/NW/solaris11_NW_VDA_response.txt
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - svr4pkg:
+           name: LGTOman
+           src: /var/tmp/NW/
+           state: present
+      - svr4pkg:
+           name: LGTOclnt
+           src: /var/tmp/NW/
+           response_file: /var/tmp/NW/solaris11_NW_VDA_response.txt
+           state: present
+   ---------------- Install of NIMSOFT -------------------------
+      - command: mkdir -p /var/tmp/NIM
+        args:
+            creates: /var/tmp/NIM
+      - copy:
+           src: /data/Playbooks/BuildPlaybooks/SolPkg/nimsoft-robot-sparcv9
+           dest: /var/tmp/NIM/nimsoft-robot-sparcv9
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/solaris11_Nimsoft_response.txt
+             dest: /var/tmp/NIM/solaris11_Nimsoft_response.txt
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - svr4pkg:
+             name: nimsoft-robot
+             src: /var/tmp/NIM/nimsoft-robot-sparcv9
+             state: present
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris_robot.cfg
+             dest: /opt/nimsoft/robot/robot.cfg
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - lineinfile:
+           path: /opt/nimsoft/robot/robot.cfg
+           regexp: 'robotip = '
+           line: '  robotip = {{ ansible_host }}'
+           state: present
+           backup: yes
+     - file:
+          state: absent
+          path: /var/tmp/NW/
+     -------------------- CCA Agent Install -----------------------
+     - command: mkdir -p /var/tmp/CCA/
+        args:
+            creates: /var/tmp/CCA/
+     - copy:
+           src: /data/Playbooks/BuildPlaybooks/SolPkg/AgentSolarisVM.bin
+           dest: /var/tmp/CCA/AgentSolarisVM.bin
+           mode: '0755'
+     - template:
+           src: /data/Playbooks/BuildPlaybooks/SolPkg/Sol11_agent.properties
+           dest: /var/tmp/CCA/Sol11_agent.properties
+           mode: '0644'
+           owner: root
+           group: root
+           backup: yes
+     - command: sh /var/tmp/CCA/AgentSolarisVM.bin -f Sol11_agent.properties -i silent
+     - lineinfile:
+           path: /opt/CA/CCAAgent/agent.conf
+           regexp: 'bindaddress='
+           line: '  bindaddress = {{ ansible_host }}'
+           state: present
+           backup: yes
+     - lineinfile:
+           path: /opt/CA/CCAAgent/agent.conf
+           regexp: 'server='
+           line: ' server=ip-w-02044-f5b-mgnt.hs-cpggpc.ca:8080'
+           state: present
+           backup: yes
+     - lineinfile:
+           path: /opt/CA/CCAAgent/agent.conf
+           regexp: 'verbose='
+           line: ' verbose=0'
+           state: present
+           backup: yes
+     - file:
+           state: absent
+           path: "/var/tmp/CCA/"
+
+
+######################## syslog template copy #################################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_syslog
+             dest: /etc/syslog.conf
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+
+######################## resolv.conf template copy ############################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/resolv.conf
+             dest: /etc/resolv.conf
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+#######################  ntp template copy ###########################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/ntp.conf
+             dest: /etc/inet/ntp.conf
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+#######################  sshd_conf template copy ##############################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/issue
+             dest: /etc/issue
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/sshd_config_solaris11
+             dest: /etc/ssh/sshd_config
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/etc_default_solaris11
+             dest: /etc/default
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+
+####################### SNMP configuration ###################################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_snmp
+             dest: /etc/net-snmp/snmp/snmpd.conf
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+####################### Nsswitch configuration ###################################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_nsswitch
+             dest: /etc/nsswitch.conf
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+####################### Restart Services ####################################
+      - service:
+            name: ssh
+            pattern: /network/ssh
+            state: restarted
+            enabled: yes
+      - service:
+            name: ntp
+            pattern: /network/ntp
+            state: restarted
+            enabled: yes
+      - service:
+            name: ntp
+            pattern: /network/ntp
+            state: restarted
+            enabled: yes
+####################### Hardening  configuration ###################################
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_default_keyserv
+             dest: /etc/default/keyserv
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_default_login
+             dest: /etc/default/login
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_security_policy
+             dest: /etc/security/policy.conf
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - template:
+             src: /data/Playbooks/BuildPlaybooks/RZ/Templates/Solaris11_default_passwd
+             dest: /etc/default/passwd
+             mode: '0644'
+             owner: root
+             group: root
+             backup: yes
+      - service:
+            name: gdm
+            pattern: /application/graphical-login/gdm
+            state: stopped
+            enabled: no
+      - service:
+            name: server
+            pattern: /network/nis/server
+            state: stopped
+            enabled: no
+      - service:
+            name: domain
+            pattern: /network/nis/domain
+            state: stopped
+            enabled: no
+      - service:
+            name: ktkt_warn
+            pattern: /network/security/ktkt_warn
+            state: stopped
+            enabled: no
+      - service:
+            name: gss
+            pattern: /network/rpc/gss
+            state: stopped
+            enabled: no
+      - service:
+            name: rmvolmgr
+            pattern: /system/filesystem/rmvolmgr
+            state: stopped
+            enabled: no
+      - service:
+            name: smserver
+            pattern: /network/rpc/smserver
+            state: stopped
+            enabled: no
+      - service:
+            name: autofs
+            pattern: /system/filesystem/autofs
+            state: stopped
+            enabled: no
+      - service:
+            name: bind
+            pattern: /network/rpc/bind
+            state: stopped
+            enabled: no
+      - service:
+            name: telnet
+            pattern: /network/telnet
+            state: stopped
+            enabled: no
+      - service:
+            name: console-login:terma
+            pattern: system/console-login:terma
+            state: stopped
+            enabled: no
+      - service:
+            name: console-login:termb
+            pattern: system/console-login:terma
+            state: stopped
+            enabled: no
+      - command: ipadm set-prop -p _strong_iss=2 tcp
+      - command: ipadm set-prop -p _forward_directed_broadcasts=0 ip
+      - command: ipadm set-prop -p _respond_to_timestamp=0 ip
+      - command: ipadm set-prop -p _respond_to_timestamp_broadcast=0 ip
+      - command: ipadm set-prop -p _respond_to_address_mask_broadcast=0 ip
+      - command: ipadm set-prop -p _respond_to_echo_broadcast=0 ip
+      - command: ipadm set-prop -p _respond_to_echo_multicast=0 ipv4
+      - command: ipadm set-prop -p _respond_to_echo_multicast=0 ipv6
+      - command: ipadm set-prop -p _ignore_redirect=1 ipv4
+      - command: ipadm set-prop -p _ignore_redirect=1 ipv6
+      - command: ipadm set-prop -p _strict_dst_multihoming=1 ipv4
+      - command: ipadm set-prop -p _strict_dst_multihoming=1 ipv6
+      - command: ipadm set-prop -p _send_redirects=0 ipv4
+      - command: ipadm set-prop -p _send_redirects=0 ipv6
+      - command: ipadm set-prop -p _rev_src_routes=0 tcp
+      - command: ipadm set-prop -p _conn_req_max_q0=4096 tcp
+      - command: ipadm set-prop -p _conn_req_max_q=1024 tcp
+      - command: routeadm -d ipv4-forwarding -d ipv4-routing
+      - command: routeadm -d ipv6-forwarding -d ipv6-routing
+################################ Auditing Settting ####################
+      - command: auditconfig -setpolicy +ahlt
+      - command: auditconfig -setpolicy -cnt
+      - command: auditconfig -setpolicy +argv
+      - command: auditconfig -setpolicy +group
+      - command: auditconfig -setpolicy +path
+      - command: auditconfig -setflags lo,ex,-ss,ad,pc,fm,fw,-fc,-fd,-fr
+      - command: auditconfig -setnaflags lo,aa,am,ex
+############################# Placing CRON for Logrotate ######################################
+      - command: logadm -w /var/log/audit.log -C 30 -c -p 1d -t '/var/log/audit.log.$n' -z 1
+      - command: logadm -w /var/log/auth.log -C 30 -c -p 1d -t '/var/log/auth.log.$n' -z 1
+      - command: logadm -w /var/log/cron.log -C 30 -c -p 1d -t '/var/log/cron.log.$n' -z 1
+      - command: logadm -w /var/log/daemon.log -C 30 -c -p 1d -t '/var/log/daemon.log.$n' -z 1
+      - command: logadm -w /var/log/kern.log -C 30 -c -p 1d -t '/var/log/kern.log.$n' -z 1
+      - command: logadm -w /var/log/user.log -C 30 -c -p 1d -t '/var/log/user.log.$n' -z 1
+      - cron:
+            name: "Logroate"
+            minuite: "0"
+            hour: "0,0"
+            job: "/usr/sbin/logadm"
+################################## END OF Playbook ##########################################

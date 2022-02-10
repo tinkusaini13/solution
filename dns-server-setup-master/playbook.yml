@@ -1,0 +1,872 @@
+#
+# Ansible playbook used to setup AhaDNS servers.
+# This file does (usually) not need to be modified.
+# Disclaimer:
+# -> I don't know any best practices when it comes to Ansible.
+# -> This file have been created on late nights, possibly (probably?) under the influence.
+# -> You're more than welcome to help me clean this up and improve the playbook!
+#
+- hosts: ahadns
+  become: true
+  vars:
+    # Get number of CPU cores & total mb ram on machine
+    num_cores: "{{ [ansible_processor_cores, ansible_processor_count, ansible_processor_vcpus] | max | int }}"
+    total_ram_mb: "{{ ansible_memtotal_mb }}"
+    only_encrypted: "{{ only_encrypted_dns | bool }}"
+    # Calculate unbound cache based on number of cores and total ram
+    # The factor 2.0 can be tweaked and is currently under assesment!
+    # unbound_rrset_cache_mb: "{{ ((total_ram_mb | int) / (2.0 * (num_cores | int))) | int }}"
+    # unbound_msg_cache_mb: "{{ ((unbound_rrset_cache_mb | int) * 0.5) | int }}"
+    # theoretical_ubound_mem_usage_mb: "{{ (((unbound_rrset_cache_mb | int) + (unbound_msg_cache_mb | int)) | int) * (num_cores | int) }}"
+
+  tasks:
+    - debug:
+        msg: "Identified machine with {{ num_cores }} cpu cores and {{ total_ram_mb }}mb RAM"
+    - debug:
+        msg: "Setup DNS server that only allow encrypted DNS queries: {{ only_encrypted }}"
+    # - debug:
+    #     msg: >
+    #       Will set unbound rrset-cache-size to {{ unbound_rrset_cache_mb }}m
+    #       and msg-cache-size to {{ unbound_msg_cache_mb }}m
+    #       which should lead to a total memory usage of {{ theoretical_ubound_mem_usage_mb }}m
+
+    - name: Set system timezone to {{ timezone }}
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: Disable stubbed resolvconf DNS
+      lineinfile:
+        path: /etc/systemd/resolved.conf
+        regexp: "DNSStubListener"
+        line: DNSStubListener=no
+        state: present
+
+    - name: Restart systemd-resolved to unbind port 53
+      systemd:
+        state: restarted
+        daemon_reload: yes
+        name: systemd-resolved
+
+    - name: Remove current /etc/resolv.conf
+      file:
+        path: /etc/resolv.conf
+        state: absent
+
+    - name: Set temporary nameserver to 1.1.1.1
+      copy:
+        dest: /etc/resolv.conf
+        content: nameserver 1.1.1.1
+        mode: "0644"
+
+    - name: Update and upgrade apt packages
+      apt:
+        update_cache: true
+        upgrade: true
+
+    - name: Install latest required packages
+      apt:
+        name: "{{ packages }}"
+      vars:
+        packages:
+          - iptables
+          - iptables-persistent
+          - unbound
+          - nginx
+          - resolvconf
+          - openssl
+          - make
+          - unattended-upgrades
+          - apt-listchanges
+          - bsd-mailx
+          - apt-transport-https
+          - curl
+      register: install_result
+
+    - name: Enable nginx
+      systemd:
+        name: nginx
+        enabled: yes
+
+    - name: Enable unbound
+      systemd:
+        name: unbound
+        enabled: yes
+
+    - name: install galaxy roles
+      command: ansible-galaxy install -r "{{ playbook_dir }}/requirements.yml"
+      delegate_to: localhost
+      become: false
+
+    #
+    # Optimize sysctl.conf
+    #
+    - name: Install custom sysctl.conf
+      copy:
+        src: sysctl.d/99-ahadns-sysctl.conf
+        dest: /etc/sysctl.d/99-ahadns-sysctl.conf
+        force: yes
+        mode: "0644"
+    - name: Fix windows CR/LF line endings in /etc/sysctl.d/99-ahadns-sysctl.conf
+      replace:
+        path: /etc/sysctl.d/99-ahadns-sysctl.conf
+        regexp: "\r"
+    - name: Reload sysctl
+      shell: sysctl -p /etc/sysctl.d/99-ahadns-sysctl.conf
+      become: true
+
+    #
+    # Configure automatic updates
+    #
+    - name: Configure automatic updates
+      block:
+        - name: Reconfigure unattended-upgrades
+          shell: dpkg-reconfigure -f noninteractive -plow unattended-upgrades
+        - name: Configure 20auto-upgrades
+          copy:
+            src: apt.conf.d/20auto-upgrades
+            dest: /etc/apt/apt.conf.d/20auto-upgrades
+            force: yes
+            mode: "0644"
+        - name: Fix windows CR/LF line endings in /etc/apt/apt.conf.d/20auto-upgrades
+          replace:
+            path: /etc/apt/apt.conf.d/20auto-upgrades
+            regexp: "\r"
+        - name: Set automatic reboot to true
+          lineinfile:
+            path: /etc/apt/apt.conf.d/50unattended-upgrades
+            regexp: 'Unattended-Upgrade::Automatic-Reboot ".*.";'
+            line: 'Unattended-Upgrade::Automatic-Reboot "true";'
+            state: present
+        - name: Set automatic reboot when user is logged in to true
+          lineinfile:
+            path: /etc/apt/apt.conf.d/50unattended-upgrades
+            regexp: 'Unattended-Upgrade::Automatic-Reboot-WithUsers ".*.";'
+            line: 'Unattended-Upgrade::Automatic-Reboot-WithUsers "true";'
+            state: present
+        - name: Set automatic reboot time to {{ automaticRebootTime }}
+          lineinfile:
+            path: /etc/apt/apt.conf.d/50unattended-upgrades
+            regexp: 'Unattended-Upgrade::Automatic-Reboot-Time ".*.";'
+            line: 'Unattended-Upgrade::Automatic-Reboot-Time "{{ automaticRebootTime }}";'
+            state: present
+        - name: Set notification mail to {{ email }}
+          lineinfile:
+            path: /etc/apt/apt.conf.d/50unattended-upgrades
+            regexp: 'Unattended-Upgrade::Mail ".*.";'
+            line: 'Unattended-Upgrade::Mail "{{ email }}";'
+            state: present
+        - name: Configure to only mail on error
+          lineinfile:
+            path: /etc/apt/apt.conf.d/50unattended-upgrades
+            regexp: 'Unattended-Upgrade::MailReport ".*.";'
+            line: 'Unattended-Upgrade::MailReport "only-on-error";'
+            state: present
+      when: "configureAutomaticUpdates | bool"
+
+    #
+    # IPTables setup
+    #
+
+    # Allow public DNS
+    - name: "Setup IPTables for unencrypted DNS"
+      block :
+        - name: Copy IPTables conf for IPv4
+          copy:
+            src: iptables/rules.v4
+            dest: /etc/iptables/rules.v4
+            force: yes
+            mode: "0644"
+        - name: Copy IPTables conf for IPv6
+          copy:
+            src: iptables/rules.v6
+            dest: /etc/iptables/rules.v6
+            force: yes
+            mode: "0644"
+      when: not only_encrypted
+
+    # Only allow Encrypted DNS
+    - name: "Setup IPTables for Encrypted DNS only"
+      block :
+        - name: Copy IPTables conf for IPv4 (Encrypted DNS only)
+          copy:
+            src: iptables/rules.encrypted.v4
+            dest: /etc/iptables/rules.v4
+            force: yes
+            mode: "0644"
+        - name: Copy IPTables conf for IPv6 (Encrypted DNS only)
+          copy:
+            src: iptables/rules.encrypted.v6
+            dest: /etc/iptables/rules.v6
+            force: yes
+            mode: "0644"
+      when: only_encrypted
+
+    - name: Setup IPTables
+      block:
+        - name: Fix windows CR/LF line endings in rules.v4
+          replace:
+            path: /etc/iptables/rules.v4
+            regexp: "\r"
+
+        - name: Fix windows CR/LF line endings in rules.v6
+          replace:
+            path: /etc/iptables/rules.v6
+            regexp: "\r"
+
+        - name: Update IP Address in rules.v4
+          replace:
+            path: /etc/iptables/rules.v4
+            regexp: "{Ipv4Addr}"
+            replace: "{{ serverIpv4 }}"
+
+        - name: Update WAN interface in rules.v4 (to {{ ansible_default_ipv4.interface }})
+          replace:
+            path: /etc/iptables/rules.v4
+            regexp: "{wanInterface}"
+            replace: "{{ ansible_default_ipv4.interface }}"
+
+        - name: Open SSH port {{ sshPort }} in rules.v4
+          replace:
+            path: /etc/iptables/rules.v4
+            regexp: "{sshPort}"
+            replace: "{{ sshPort | string }}"
+
+        - name: Update IP Address in rules.v6
+          replace:
+            path: /etc/iptables/rules.v6
+            regexp: "{Ipv6Addr}"
+            replace: "{{ serverIpv6 }}"
+
+        - name: Update WAN interface in rules.v6 (to {{ ansible_default_ipv6.interface }})
+          replace:
+            path: /etc/iptables/rules.v6
+            regexp: "{wanInterface}"
+            replace: "{{ ansible_default_ipv6.interface }}"
+
+        #
+        # There's a known issue here where
+        # the playbook 'hangs' when restoring IPTable rules.
+        # This should be investigated and fixed!
+        #
+        - name: iptables restore v4 (This will probably hang first time. Just ctrl + c and re-execute playbook!)
+          shell: iptables-restore < /etc/iptables/rules.v4
+          become: true
+          register: reload_ipv4
+          until: reload_ipv4.rc == 0
+          retries: 2
+          delay: 1
+          ignore_errors: no
+
+        - name: iptables restore v6
+          shell: ip6tables-restore < /etc/iptables/rules.v6
+          become: true
+
+    #
+    # Unbound setup
+    #
+    - name: Make sure that *.conf files are included in unbound.conf
+      lineinfile:
+        path: /etc/unbound/unbound.conf
+        state: present
+        regexp: '^include:.\*\.conf\"$'
+        line: 'include: "/etc/unbound/unbound.conf.d/*.conf"'
+
+    - name: Copy custom unbound.conf
+      copy:
+        src: unbound/ahadns.conf
+        dest: /etc/unbound/unbound.conf.d/ahadns.conf
+        force: yes
+        mode: "0644"
+
+    # --- Public DNS
+    - name: "Setup unbound to allow DNS queries from everyone"
+      block:
+        - name: Make unbound listen to IPv6 {{ serverIpv6 }}
+          replace:
+            path: /etc/unbound/unbound.conf.d/ahadns.conf
+            regexp: "{Ipv6Addr}"
+            replace: "{{ serverIpv6 }}"
+      when: not only_encrypted
+    # --- Local DNS only
+    - name: "Setup unbound to only allow queries from localhost"
+      block:
+        - name: Remove unbound listen directive for {{ serverIpv6 }}
+          lineinfile:
+              path: /etc/unbound/unbound.conf.d/ahadns.conf
+              regexp: "{Ipv6Addr}"
+              line: ""
+              state: present
+        - name: Change unbound access control 0.0.0.0/0 to 127.0.0.1/32
+          replace:
+            path: /etc/unbound/unbound.conf.d/ahadns.conf
+            regexp: "0.0.0.0/0"
+            replace: "127.0.0.1/32"
+        - name: Change unbound access control ::0/0 to ::1/128
+          replace:
+            path: /etc/unbound/unbound.conf.d/ahadns.conf
+            regexp: "::0/0"
+            replace: "::1/128"
+        - name: Make unbound listen to 127.0.0.1 only
+          replace:
+            path: /etc/unbound/unbound.conf.d/ahadns.conf
+            regexp: "0.0.0.0"
+            replace: "127.0.0.1"
+        - name: Make unbound listen to ::1 only
+          replace:
+            path: /etc/unbound/unbound.conf.d/ahadns.conf
+            regexp: "::0"
+            replace: "::1"
+      when: only_encrypted
+
+    - name: Set unbound num_threads to {{ num_cores | int }}
+      replace:
+        path: /etc/unbound/unbound.conf.d/ahadns.conf
+        regexp: "{num_cores}"
+        replace: "{{ num_cores | int }}"
+
+    - name: Set unbound slabs to {{ (num_cores | int) * 2 | int }}
+      replace:
+        path: /etc/unbound/unbound.conf.d/ahadns.conf
+        regexp: "{num_coresx2}"
+        replace: "{{ (num_cores | int) * 2 | int }}"
+
+    # - name: Set unbound rrset-cache-size to {{ unbound_rrset_cache_mb | int }}m
+    #   replace:
+    #     path: /etc/unbound/unbound.conf.d/ahadns.conf
+    #     regexp: "{rrset_cache_mb}"
+    #     replace: "{{ unbound_rrset_cache_mb | int }}"
+
+    # - name: Set unbound msg-cache-size to {{ unbound_msg_cache_mb | int }}m
+    #   replace:
+    #     path: /etc/unbound/unbound.conf.d/ahadns.conf
+    #     regexp: "{msg_cache_mb}"
+    #     replace: "{{ unbound_msg_cache_mb | int }}"
+
+    - name: Download DNS root hints
+      get_url:
+        url: https://www.internic.net/domain/named.root
+        dest: /var/lib/unbound/root.hints
+        mode: "0644"
+        force: yes
+
+    - name: Touch /etc/unbound/unbound_blocklist.conf
+      file:
+        path: /etc/unbound/unbound_blocklist.conf
+        state: touch
+        mode: "0644"
+
+    - name: Touch /etc/unbound/unbound_whitelist.conf
+      file:
+        path: /etc/unbound/unbound_whitelist.conf
+        state: touch
+        mode: "0644"
+
+    - name: Restart unbound
+      systemd:
+        state: restarted
+        daemon_reload: yes
+        name: unbound
+
+    - name: Update local resolver to 127.0.0.1
+      copy:
+        content: nameserver 127.0.0.1
+        dest: /etc/resolvconf/resolv.conf.d/original
+        force: yes
+        mode: "0644"
+
+    - name: Reconfigure resolvconf
+      shell: dpkg-reconfigure -f noninteractive resolvconf
+
+    - name: Update /etc/resolv.conf
+      shell: resolvconf -u
+
+    #
+    # Setup local scripts
+    #
+    - name: Setup local scripts
+      block:
+        - name: "Create /etc/ahadns directory"
+          file:
+            path: /etc/ahadns
+            state: directory
+            mode: "0755"
+
+        - name: Copy unbound_update.sh
+          copy:
+            src: scripts/bash/unbound_update.sh
+            dest: /etc/ahadns/unbound_update.sh
+            mode: "0744"
+            force: yes
+
+        - name: Copy unbound_root_hints.sh
+          copy:
+            src: scripts/bash/unbound_root_hints.sh
+            dest: /etc/ahadns/unbound_root_hints.sh
+            mode: "0744"
+            force: yes
+
+        - name: Copy ahadns_log_purge.sh
+          copy:
+            src: scripts/bash/ahadns_log_purge.sh
+            dest: /etc/ahadns/ahadns_log_purge.sh
+            mode: "0744"
+            force: yes
+
+        # This can be removed after a few versions!
+        - name: Remove previous /etc/cron.d/ahadns-cron file
+          file:
+            path: /etc/cron.d/ahadns-cron
+            state: absent
+
+        - name: Setup custom cron-jobs
+          copy:
+            src: cron.d/ahadns
+            dest: /etc/cron.d/ahadns
+            mode: "0644"
+            force: yes
+
+    - name: Fix windows CR/LF line endings in /etc/cron.d/ahadns
+      replace:
+        path: /etc/cron.d/ahadns
+        regexp: "\r"
+    - name: Fix windows CR/LF line endings in /etc/ahadns/unbound_update.sh
+      replace:
+        path: /etc/ahadns/unbound_update.sh
+        regexp: "\r"
+    - name: Fix windows CR/LF line endings in /etc/ahadns/unbound_root_hints.sh
+      replace:
+        path: /etc/ahadns/unbound_root_hints.sh
+        regexp: "\r"
+    - name: Fix windows CR/LF line endings in /etc/ahadns/ahadns_log_purge.sh
+      replace:
+        path: /etc/ahadns/ahadns_log_purge.sh
+        regexp: "\r"
+
+    - name: Make sure /etc/ahadns/unbound_update.sh is executable
+      file:
+        path: /etc/ahadns/unbound_update.sh
+        mode: "0744"
+    - name: Make sure /etc/ahadns/unbound_root_hints.sh is executable
+      file:
+        path: /etc/ahadns/unbound_root_hints.sh
+        mode: "0744"
+    - name: Make sure /etc/ahadns/ahadns_log_purge.sh is executable
+      file:
+        path: /etc/ahadns/ahadns_log_purge.sh
+        mode: "0744"
+
+      # shell: "chmod +x /etc/ahadns/unbound_update.sh; chmod +x /etc/ahadns/unbound_root_hints.sh; chmod +x /etc/ahadns/ahadns_log_purge.sh"
+      # become: true
+
+    #
+    # Execute local scripts to verify functionality
+    #
+    - name: Execute unbound_update.sh
+      shell: /etc/ahadns/unbound_update.sh
+    - name: Execute ahadns_log_purge.sh
+      shell: /etc/ahadns/ahadns_log_purge.sh
+    - name: Execute unbound_root_hints.sh
+      shell: /etc/ahadns/unbound_root_hints.sh
+
+    #
+    # Custom /etc/security/limits.d configuration
+    # to increase max open files for all users.
+    # Needed for Nginx to handle many connections.
+    # Verify with "ulimit -a"
+    #
+    - name: Increase max open files for all users
+      copy:
+        src: security/limits.d/99-ahadns-limits.conf
+        dest: /etc/security/limits.d/99-ahadns-limits.conf
+        mode: "0644"
+        force: yes
+    - name: Fix windows CR/LF line endings in /etc/security/limits.d/99-ahadns-limits.conf
+      replace:
+        path: /etc/security/limits.d/99-ahadns-limits.conf
+        regexp: "\r"
+    - name: Increase max open files in /etc/systemd/system.conf
+      lineinfile:
+        path: /etc/systemd/system.conf
+        regexp: "DefaultLimitNOFILE"
+        line: DefaultLimitNOFILE=256000:1000000
+        state: present
+    - name: Increase max open files in /etc/systemd/user.conf
+      lineinfile:
+        path: /etc/systemd/user.conf
+        regexp: "DefaultLimitNOFILE"
+        line: DefaultLimitNOFILE=256000:1000000
+        state: present
+
+    #
+    # Nginx setup
+    #
+    - name: Configure Nginx
+      block:
+        - name: Configure Nginx stapling
+          copy:
+            src: nginx/conf.d/stapling.conf
+            dest: /etc/nginx/conf.d/stapling.conf
+            mode: "0644"
+            force: yes
+        - name: Enable Nginx streams
+          lineinfile:
+            path: /etc/nginx/nginx.conf
+            insertafter: "include \/etc\/nginx\/modules-enabled"
+            line: "include /etc/nginx/streams-enabled/*;"
+            state: present
+        - name: "Create Nginx streams directory"
+          file:
+            path: /etc/nginx/streams-enabled
+            state: directory
+            mode: "0755"
+        - name: Secure Nginx TLS versions
+          lineinfile:
+            path: /etc/nginx/nginx.conf
+            regexp: "ssl_protocols "
+            line: ssl_protocols TLSv1.2 TLSv1.3;
+            state: present
+        - name: Configure Nginx to not prefer server ciphers
+          lineinfile:
+            path: /etc/nginx/nginx.conf
+            regexp: "ssl_prefer_server_ciphers "
+            line: ssl_prefer_server_ciphers off;
+            state: present
+        - name: Increase Nginx worker_connections to 10000
+          lineinfile:
+            path: /etc/nginx/nginx.conf
+            regexp: "worker_connections "
+            line: worker_connections 10000;
+            state: present
+        - name: Configure default Nginx site
+          copy:
+            src: nginx/sites-available/default
+            dest: /etc/nginx/sites-available/default
+            mode: "0644"
+            force: yes
+        - name: Enable default site
+          file:
+            src: /etc/nginx/sites-available/default
+            dest: /etc/nginx/sites-enabled/default
+            state: link
+
+    # SSL certificates
+    - name: Check if SSL cert exist for {{ hostname }}
+      stat:
+        path: /etc/letsencrypt/live/{{ hostname }}/privkey.pem
+      register: web_ssl_exist
+
+    - name: Check if SSL cert exist for {{ dohEndpoint }}
+      stat:
+        path: /etc/letsencrypt/live/{{ dohEndpoint }}/privkey.pem
+      register: doh_ssl_exist
+
+    - name: Check if SSL cert exist for {{ dotEndpoint }}
+      stat:
+        path: /etc/letsencrypt/live/{{ dotEndpoint }}/privkey.pem
+      register: dot_ssl_exist
+
+    - name: Generating LetsEncrypt SSL for {{ hostname }}
+      include_role:
+        name: geerlingguy.certbot
+      vars:
+        certbot_create_if_missing: yes
+        certbot_create_method: standalone
+        certbot_admin_email: "{{ email }}"
+        certbot_auto_renew: true
+        certbot_auto_renew_hour: "3"
+        certbot_auto_renew_minute: "30"
+        certbot_auto_renew_user: root
+        certbot_auto_renew_options: '--quiet --no-self-upgrade --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"'
+        certbot_certs:
+          - domains:
+              - "{{ hostname }}"
+        certbot_create_standalone_stop_services:
+          - nginx
+      when: not web_ssl_exist.stat.exists
+
+    - name: Generating LetsEncrypt SSL for {{ dohEndpoint }}
+      include_role:
+        name: geerlingguy.certbot
+      vars:
+        certbot_create_if_missing: yes
+        certbot_create_method: standalone
+        certbot_admin_email: "{{ email }}"
+        certbot_auto_renew: true
+        certbot_auto_renew_hour: "3"
+        certbot_auto_renew_minute: "40"
+        certbot_auto_renew_user: root
+        certbot_auto_renew_options: '--quiet --no-self-upgrade --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"'
+        certbot_certs:
+          - domains:
+              - "{{ dohEndpoint }}"
+        certbot_create_standalone_stop_services:
+          - nginx
+      when: not doh_ssl_exist.stat.exists
+
+    - name: Generating LetsEncrypt SSL for {{ dotEndpoint }}
+      include_role:
+        name: geerlingguy.certbot
+      vars:
+        certbot_create_if_missing: yes
+        certbot_create_method: standalone
+        certbot_admin_email: "{{ email }}"
+        certbot_auto_renew: true
+        certbot_auto_renew_hour: "3"
+        certbot_auto_renew_minute: "50"
+        certbot_auto_renew_user: root
+        certbot_auto_renew_options: '--quiet --no-self-upgrade --pre-hook "systemctl stop nginx" --post-hook "systemctl start nginx"'
+        certbot_certs:
+          - domains:
+              - "{{ dotEndpoint }}"
+        certbot_create_standalone_stop_services:
+          - nginx
+      when: not dot_ssl_exist.stat.exists
+
+    # Hostname
+    - name: Copy Nginx config for {{ hostname }}
+      block:
+        - name: Configure site {{ hostname }}
+          copy:
+            src: nginx/sites-available/web
+            dest: /etc/nginx/sites-available/web
+            mode: "0644"
+            force: yes
+        - name: Insert hostname {{ hostname }} in /etc/nginx/sites-available/web
+          replace:
+            path: /etc/nginx/sites-available/web
+            regexp: "{ServerName}"
+            replace: "{{ hostname }}"
+        - name: Enable site {{ hostname }}
+          file:
+            src: /etc/nginx/sites-available/web
+            dest: /etc/nginx/sites-enabled/web
+            state: link
+
+    # DoH
+    - name: Copy Nginx config for {{ dohEndpoint }}
+      block:
+        - name: Configure site {{ dohEndpoint }}
+          copy:
+            src: nginx/sites-available/doh
+            dest: /etc/nginx/sites-available/doh
+            mode: "0644"
+            force: yes
+        - name: Insert hostname {{ dohEndpoint }} to /etc/nginx/sites-available/doh
+          replace:
+            path: /etc/nginx/sites-available/doh
+            regexp: "{ServerName}"
+            replace: "{{ dohEndpoint }}"
+        - name: Enable site {{ dohEndpoint }}
+          file:
+            src: /etc/nginx/sites-available/doh
+            dest: /etc/nginx/sites-enabled/doh
+            state: link
+
+    # DoT
+    - name: Copy Nginx config for {{ dotEndpoint }}
+      block:
+        - name: Configure site {{ dotEndpoint }}
+          copy:
+            src: nginx/sites-available/dot
+            dest: /etc/nginx/sites-available/dot
+            mode: "0644"
+            force: yes
+        - name: Insert hostname {{ dotEndpoint }} to /etc/nginx/sites-available/dot
+          replace:
+            path: /etc/nginx/sites-available/dot
+            regexp: "{ServerName}"
+            replace: "{{ dotEndpoint }}"
+        - name: Enable site {{ dotEndpoint }}
+          file:
+            src: /etc/nginx/sites-available/dot
+            dest: /etc/nginx/streams-enabled/dot
+            state: link
+
+    # Other
+    - name: Check if dhparams exist
+      stat:
+        path: /etc/letsencrypt/aha-dhparams.pem
+      register: dhparams_exist
+
+    - name: Generate 4096-bit aha-dhparams.pem (This can take a while!)
+      shell: openssl dhparam -out /etc/letsencrypt/aha-dhparams.pem 4096
+      become: true
+      when: not dhparams_exist.stat.exists
+
+    - name: Restart Nginx
+      systemd:
+        state: restarted
+        daemon_reload: yes
+        name: nginx
+
+    #
+    # Install Golang
+    #
+    - name: Remove old version of Golang
+      block:
+        - name: Remove current Golang version in /opt/go/ folder
+          file:
+            path: /opt/go/
+            state: absent
+        - name: Remove /etc/profile.d/golang.sh
+          file:
+            path: /etc/profile.d/golang.sh
+            state: absent
+
+    - name: Setup Golang
+      block:
+        - name: Install Golang v{{ golangVersion }}
+          include_role:
+            name: gantsign.golang
+          vars:
+            - golang_version: "{{ golangVersion }}"
+            - golang_download_dir: /opt/go
+            - golang_install_dir: "/opt/go/{{ golangVersion }}"
+
+    #
+    # Install DoH server
+    #
+    - name: Completely remove old DoH server version (if installed)
+      block:
+        - name: Try stop DoH server (error here is fine...)
+          systemd:
+            name: doh-server
+            state: stopped
+          ignore_errors: true
+        - name: Uninstall old DoH server version
+          shell: "cd; . /etc/profile; cd /opt/m13253/; make uninstall; cd"
+          become: true
+        - name: Remove old DoH server config files at /etc/dns-over-https/
+          file:
+            path: /etc/dns-over-https/
+            state: absent
+        - name: Remove old DoH server version at /opt/m13253/
+          file:
+            path: /opt/m13253/
+            state: absent
+
+    - name: Setup DoH server
+      block:
+        - name: Download m13253 DoH server version {{ m13253DohServerVersion }}
+          get_url:
+            url: https://github.com/m13253/dns-over-https/archive/v{{ m13253DohServerVersion }}.tar.gz
+            dest: /tmp/v{{ m13253DohServerVersion }}.tar.gz
+            mode: "0644"
+            force: yes
+        - name: Create /opt/m13253/ directory
+          file:
+            path: /opt/m13253/
+            state: directory
+            mode: "0755"
+        - name: Unpack m13253 DoH server version {{ m13253DohServerVersion }}
+          unarchive:
+            src: /tmp/v{{ m13253DohServerVersion }}.tar.gz
+            dest: /opt/m13253/
+            remote_src: yes
+        - name: Move unpacked files
+          shell: "mv /opt/m13253/dns-over-https-{{ m13253DohServerVersion }}/* /opt/m13253/"
+          become: true
+        - name: Install DoH server as a service
+          shell: "cd; . /etc/profile; cd /opt/m13253/; make install"
+          become: true
+        - name: Enable DoH server
+          systemd:
+            name: doh-server
+            enabled: yes
+        - name: Disable DoH client
+          systemd:
+            name: doh-client
+            enabled: false
+        - name: Copy DoH server config
+          copy:
+            src: m13253-doh/doh-server.conf
+            dest: /etc/dns-over-https/doh-server.conf
+            mode: "0644"
+            force: yes
+        - name: Restart DoH server
+          systemd:
+            state: restarted
+            daemon_reload: yes
+            name: doh-server
+
+    #
+    # Install .NET runtime (for AhaDNS custom code)
+    #
+    - name: Install .NET dependencies
+      block:
+        - name: Download .NET deb
+          get_url:
+            url: https://packages.microsoft.com/config/debian/10/packages-microsoft-prod.deb
+            dest: /tmp/packages-microsoft-prod.deb
+            mode: "0644"
+            force: yes
+
+        - name: Setup .NET apt repo
+          apt: deb="/tmp/packages-microsoft-prod.deb"
+
+        - name: Install .NET Core SDK
+          apt:
+            update_cache: true
+            name: "dotnet-sdk-{{ dotnetVersion }}"
+
+    #
+    # Install AhaDNS server statistics API
+    #
+    - name: Setup AhaDNS server statistics API
+      block:
+        - name: Download AhaDNS statistics API version {{ ahaDnsStatisticsApiVersion }}
+          get_url:
+            url: https://github.com/AhaDNS/Aha.Dns.Statistics/archive/v{{ ahaDnsStatisticsApiVersion }}.tar.gz
+            dest: /tmp/aha-statistics-v{{ ahaDnsStatisticsApiVersion }}.tar.gz
+            mode: "0644"
+            force: yes
+
+        - name: Remove folder /opt/aha-dns-statisticsapi/
+          file:
+            path: /opt/aha-dns-statisticsapi/
+            state: absent
+
+        - name: Create folder /opt/aha-dns-statisticsapi/
+          file:
+            path: /opt/aha-dns-statisticsapi/
+            state: directory
+            mode: "0755"
+
+        - name: Unpack AhaDNS statistics API version {{ ahaDnsStatisticsApiVersion }}
+          unarchive:
+            src: /tmp/aha-statistics-v{{ ahaDnsStatisticsApiVersion }}.tar.gz
+            dest: /opt/aha-dns-statisticsapi/
+            remote_src: yes
+
+        - name: Build AhaDNS statistics API version {{ ahaDnsStatisticsApiVersion }}
+          shell: >
+            /usr/bin/dotnet publish
+            --configuration Release
+            /opt/aha-dns-statisticsapi/Aha.Dns.Statistics-{{ ahaDnsStatisticsApiVersion }}/src/Aha.Dns.Statistics.ServerApi
+            --output
+            /opt/aha-dns-statisticsapi/
+
+        - name: Configure AhaDNS statistics API key
+          lineinfile:
+            path: /opt/aha-dns-statisticsapi/appsettings.json
+            regexp: '"ApiKey": ".*.",'
+            line: '"ApiKey": "{{ ahaDnsStatisticsApiKey }}",'
+            state: present
+
+        - name: Create aha-dns-statisticsapi service
+          copy:
+            src: systemd/aha-dns-statisticsapi.service
+            dest: /etc/systemd/system/aha-dns-statisticsapi.service
+            mode: "0644"
+            force: yes
+
+        - name: Enable aha-dns-statisticsapi service
+          systemd:
+            name: aha-dns-statisticsapi
+            enabled: yes
+
+        - name: Restart aha-dns-statisticsapi service
+          systemd:
+            state: restarted
+            daemon_reload: yes
+            name: aha-dns-statisticsapi

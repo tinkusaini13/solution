@@ -1,0 +1,22 @@
+- name: reboot
+  shell: sleep 1 && shutdown -r now "Reboot by ansible os update"
+  async: 1
+  poll: 0
+  changed_when: true
+  failed_when: false
+  when:
+  - reboot_host
+  - ansible_hostname != lookup('pipe','hostname')
+  notify:
+  - wait
+
+- name: wait
+  delegate_to: localhost
+  wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: "{{ ansible_port }}"
+    state: started
+    delay: 10
+    timeout: "{{ reboot_timeout }}"
+  when:
+  - wait_for_host_after_reboot

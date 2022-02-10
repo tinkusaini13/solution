@@ -1,0 +1,115 @@
+---
+#
+# Ansible playbook to update all RPM packages on a lab VM (powered by Oracle Linux 7.8 and later)
+# prior to the installation of Oracle binaries (only).
+#
+# NEVER USE THIS PLAYBOOK ON A VM THAT HASN'T JUST FRESHLY BEEN PROVISIONED! 
+#
+# It is _only_ intended to be used as part of the initial Oracle installation on a fresh VM.
+#
+# The system upgrade includes the kernel as well, as it's an integral part of the system 
+# and newer kernels provide security fixes and performance enhancements.
+#
+# The installation of a new kernel requires a reboot to become effective. You can control
+# whether you want to reboot straight away or later (see variable "reboot"). The default is
+# not to reboot the VM as part of the playbook's execution.
+#
+# The playbook requires the server to be booted into Oracle's Unbreakable Enterprise Kernel
+# (UEK) for now, this can easily be changed if needed. 
+#
+# The reboot module requires ansible >= 2.7. 
+#
+# Both conditions are enforced. 
+#
+# As an added safety net, the playbook checks  for the presence of /etc/oraInst.loc and 
+# /etc/oratab, which admittedly isn't a perfect way of identifying the presence of Oracle 
+# software, but it's better than nothing. 
+# It is _your_ responsibility to ensure you don't run this playbook outside the initial Oracle 
+# software installation.
+#
+# PARAMETERS
+# - reboot: if set to true the playbook is going to reboot the VM straight away. If set to
+#      false it is your responsibility to reboot into the new kernel
+# 
+# Please refer to https://martincarstenbach.wordpress.com/ for more details
+#
+
+- hosts: oracledb
+  name: full system upgrade of a lab VM prior to the installation of Oracle 19c
+  become: yes
+  vars:
+    reboot: false
+
+  tasks:
+  - name: fail if the O/S is not detected as Oracle Linux 7.8 or later
+    fail:
+      msg: This playbook is written for Oracle Linux Linux 7.8 and later
+    when: ansible_distribution != 'OracleLinux' and ansible_distribution_version is version('7.8', '<')
+
+  - name: fail if Oracle's UEK5 is not in use
+    fail:
+      msg: this playbook only covers Oracle's Unbreakable Enterprise Kernel UEK Release 5
+    when: not ansible_kernel is search ("4.14")
+
+  - name: fail if the Ansible release is older than 2.7
+    fail:
+      msg: This playbook requires Ansible 2.7 or later
+    when: ansible_version.full is version('2.7', '<=')
+
+  # no guarantee this detects _your_ Oracle installation, see notes
+  - name: try to detect Oracle software
+    block:
+      - name: try to detect Oracle Universal Installer's inventory pointer 
+        stat: path=/etc/oraInst.loc
+        register: orainst
+
+      - name: fail if inventory pointer was detected
+        fail:
+          msg: It appears as if Oracle database software has already been installed, aborting 
+        when: orainst.stat.exists | bool
+
+      - name: try to detect the database's oratab file
+        stat: path=/etc/oratab
+        register: oratab
+
+      - name: fail if an oratab file was detected
+        fail:
+          msg: It appears as if Oracle database software has already been installed, aborting 
+        when: oratab.stat.exists | bool
+
+  #
+  # this is where the actual work is done
+  # 
+  - name: update all packages (remain on the UEK5 branch)
+    yum:
+      name: '*'
+      state: latest
+      enablerepo: ol7_UEKR5
+      disablerepo: ol7_UEKR6
+      update_cache: yes
+
+  - name: get latest kernel UEK installed on disk
+    shell: /usr/bin/rpm -q kernel-uek | /usr/bin/sort -V | /usr/bin/tail -1
+    register: latest_uek
+    args:
+      warn: false
+
+  - name: trim the RPM name to make it easier to compare with Ansible's facts
+    set_fact:
+      latest_uek_rel: "{{ latest_uek.stdout | regex_replace('kernel-uek-(.*)', '\\1') }}"
+
+  - name: print detected kernel releases
+    debug:
+      msg: |
+        This server booted into UEK {{ ansible_kernel }}, 
+        the latest kernel on disk is {{ latest_uek_rel }}.
+
+  - name: reboot the VM
+    reboot:
+      msg: Ansible is rebooting the VM now
+    when: ansible_kernel != latest_uek_rel and reboot | bool 
+
+  - name: print reboot reminder
+    debug:
+      msg: A new kernel has been installed, please remember to reboot the VM at an opportune moment
+    when: ansible_kernel != latest_uek_rel and reboot | bool == false
